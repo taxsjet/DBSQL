@@ -1,0 +1,13 @@
+services:
+  postgres:
+    build: .
+    ports:
+      - "5432:5432" # データベースに接続するためのポート番号
+    environment:
+      POSTGRES_USER: 'guest' # 初期ユーザー名
+      POSTGRES_PASSWORD: 'password' # 初期パスワード
+      POSTGRES_DB: 'my-db' # データベースの名前
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+volumes:
+  postgres_data:
