@@ -8,7 +8,7 @@ from datetime import datetime, date, timedelta
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-123')
 
-# --- データベース設定 ---
+# --- データベース設定（Render対応） ---
 database_url = os.environ.get('DATABASE_URL')
 if database_url and database_url.startswith("postgres://"):
     database_url = database_url.replace("postgres://", "postgresql://", 1)
@@ -90,8 +90,8 @@ BASE_HTML = """
         .visual-bar { width: 100%; height: 100%; border-radius: 8px; border: 2px solid rgba(0,0,0,0.05); transition: transform 0.1s; }
         .fav-palette { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
         .color-dot { width: 30px; height: 30px; border-radius: 50%; cursor: pointer; border: 2px solid #fff; box-shadow: 0 0 3px rgba(0,0,0,0.2); transition: transform 0.2s; }
-        .add-fav-btn { font-size: 0.8rem; cursor: pointer; color: #666; background: #eee; border: none; padding: 5px 10px; border-radius: 4px; margin-top: 5px; }
         .streak-badge { font-size: 0.8rem; background: #fffaf0; color: #dd6b20; border: 1px solid #fbd38d; padding: 2px 8px; border-radius: 12px; font-weight: bold; margin-left: 8px; }
+        .add-fav-btn { font-size: 0.8rem; cursor: pointer; color: #666; background: #eee; border: none; padding: 5px 10px; border-radius: 4px; margin-top: 5px; }
         #calendar { margin-bottom: 30px; }
     </style>
 </head>
@@ -112,66 +112,133 @@ BASE_HTML = """
 </html>
 """
 
-# --- 色管理用UI ---
+# --- 色管理用UIコンポーネント ---
 def get_color_ui_html(current_color, picker_id, bar_id):
     favs = FavoriteColor.query.filter_by(user_id=current_user.id).all()
-    fav_dots = "".join([f'<div class="color-dot" style="background: {f.hex_code};" onclick="applyFav(\'{f.hex_code}\', \'{picker_id}\', \'{bar_id}\')"></div>' for f in favs])
+    fav_dots = "".join([f'''
+        <div class="color-dot" 
+             style="background: {f.hex_code};" 
+             onclick="applyFav('{f.hex_code}', '{picker_id}', '{bar_id}')"
+             oncontextmenu="deleteFav(event, '{f.id}')"
+             title="右クリックで削除">
+        </div>''' for f in favs])
+    
     return f"""
     <div class="color-selector-wrapper">
         <input type="color" name="color" class="real-picker" id="{picker_id}" value="{current_color}">
         <div id="{bar_id}" class="visual-bar" style="background: {current_color};"></div>
     </div>
     <div class="fav-palette">{fav_dots}</div>
-    <button type="button" class="add-fav-btn" onclick="saveFav('{picker_id}')">お気に入り登録</button>
+    <p style="font-size: 0.75rem; color: #888; margin: 5px 0;">※右クリックで削除</p>
+    <button type="button" class="add-fav-btn" onclick="saveFav('{picker_id}')">今の色を登録</button>
     <script>
-        document.getElementById('{picker_id}').oninput = function() {{ document.getElementById('{bar_id}').style.background = this.value; }};
-        function applyFav(hex, pId, bId) {{ document.getElementById(pId).value = hex; document.getElementById(bId).style.background = hex; }}
+        document.getElementById('{picker_id}').oninput = function() {{
+            document.getElementById('{bar_id}').style.background = this.value;
+        }};
+        function applyFav(hex, pId, bId) {{
+            document.getElementById(pId).value = hex;
+            document.getElementById(bId).style.background = hex;
+        }}
         function saveFav(pId) {{
             const hex = document.getElementById(pId).value;
-            fetch('/colors/favorite', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({{ hex: hex }}) }})
-            .then(res => res.json()).then(data => {{ if(data.success) location.reload(); }});
+            fetch('/colors/favorite', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{ hex: hex }})
+            }}).then(res => res.json()).then(data => {{ if(data.success) location.reload(); }});
+        }}
+        function deleteFav(event, favId) {{
+            event.preventDefault();
+            if (confirm('削除しますか？')) {{
+                fetch('/colors/favorite/delete/' + favId, {{ method: 'POST' }})
+                .then(res => res.json()).then(data => {{ if(data.success) location.reload(); }});
+            }}
+            return false;
         }}
     </script>
     """
 
-# --- ルート設定 ---
+# --- 各ルート設定 ---
 
 @app.route('/')
 def index():
     if not current_user.is_authenticated: return redirect(url_for('login'))
     today = date.today()
     tasks = Task.query.filter_by(user_id=current_user.id).all()
-    urgent_html = "".join([f'<div class="card alert-card"><b>🔥 あと{(t.task_date - today).days}日:</b> {t.title}</div>' for t in tasks if not t.is_completed and (t.task_date - today).days <= t.notify_days_before])
-    content = f"<h2>こんにちは、{current_user.username}さん</h2>{urgent_html}<div id='calendar'></div><script>document.addEventListener('DOMContentLoaded', function() {{ var cal = new FullCalendar.Calendar(document.getElementById('calendar'), {{ initialView: 'dayGridMonth', locale: 'ja', events: '/api/events' }}); cal.render(); }});</script>"
+    urgent_tasks_html = ""
+    for t in tasks:
+        if not t.is_completed and t.is_notify:
+            notice_start = t.task_date - timedelta(days=t.notify_days_before)
+            if notice_start <= today <= t.task_date:
+                diff = (t.task_date - today).days
+                urgent_tasks_html += f'<div class="card alert-card"><b>【{"今日まで" if diff==0 else "あと"+str(diff)+"日"}】</b> {t.title}</div>'
+
+    content = f"""
+    <h2>こんにちは、{current_user.username} さん</h2>
+    {f'<div><h3>🔥 緊急タスク</h3>{urgent_tasks_html}</div><hr>' if urgent_tasks_html else ''}
+    <div id="calendar"></div>
+    <script>
+      document.addEventListener('DOMContentLoaded', function() {{
+        var cal = new FullCalendar.Calendar(document.getElementById('calendar'), {{
+          initialView: 'dayGridMonth', locale: 'ja',
+          events: '/api/events',
+          eventClick: function(info) {{
+            var p = info.event.extendedProps;
+            if (p.type === 'タスク') {{
+                if (confirm(info.event.title + "\\n完了を切り替えますか？")) window.location.href = "/tasks/complete/" + p.db_id;
+            }} else {{
+                if (!p.is_today) {{ window.location.href = "/habits"; }}
+                else if (p.already_done) {{ alert("達成済みです！"); }}
+                else {{ if (confirm("達成しましたか？")) window.location.href = "/habits/achieve/" + p.db_id + "?from=home"; }}
+            }}
+          }}
+        }});
+        cal.render();
+      }});
+    </script>
+    """
     return render_template_string(BASE_HTML, content=content)
 
 @app.route('/api/events')
 @login_required
 def get_events():
     events = []
+    today = date.today()
     tasks = Task.query.filter_by(user_id=current_user.id).all()
     for t in tasks:
-        events.append({'title': f"📌 {t.title}", 'start': t.task_date.isoformat(), 'color': t.color if not t.is_completed else '#ccc'})
-    
+        events.append({
+            'title': f"{'✅' if t.is_completed else '📌'} {t.title}",
+            'start': t.task_date.isoformat(),
+            'color': t.color if not t.is_completed else '#ccc',
+            'extendedProps': {'type': 'タスク', 'db_id': t.id}
+        })
     habits = Habit.query.filter_by(user_id=current_user.id).all()
-    today = date.today()
     for i in range(-30, 31):
         curr = today + timedelta(days=i)
-        dow = ['月曜日','火曜日','水曜日','木曜日','金曜日','土曜日','日曜日'][curr.weekday()]
+        dow_str = ['月曜日','火曜日','水曜日','木曜日','金曜日','土曜日','日曜日'][curr.weekday()]
         for h in habits:
-            if h.day_of_week == dow:
-                events.append({'title': f"🔄 {h.title}", 'start': curr.isoformat(), 'color': h.color})
+            if h.day_of_week == dow_str:
+                is_today = (curr == today)
+                is_achieved = (h.last_achieved_date == today)
+                events.append({
+                    'title': f"{'✅' if (is_today and is_achieved) else '🔄'} {h.title}",
+                    'start': curr.isoformat(),
+                    'color': '#ccc' if (is_today and is_achieved) else h.color,
+                    'extendedProps': {'type': '習慣', 'db_id': h.id, 'is_today': is_today, 'already_done': is_achieved}
+                })
     return jsonify(events)
 
 @app.route('/tasks', methods=['GET', 'POST'])
 @login_required
 def manage_tasks():
     if request.method == 'POST':
-        new_t = Task(user_id=current_user.id, task_date=datetime.strptime(request.form.get('date'), '%Y-%m-%d').date(), title=request.form.get('title'), color=request.form.get('color'))
+        new_t = Task(user_id=current_user.id, task_date=datetime.strptime(request.form.get('date'), '%Y-%m-%d').date(),
+            title=request.form.get('title'), color=request.form.get('color'), notify_days_before=int(request.form.get('notify', 1)))
         db.session.add(new_t); db.session.commit(); return redirect(url_for('manage_tasks'))
     tasks = Task.query.filter_by(user_id=current_user.id).order_by(Task.task_date).all()
-    t_html = "".join([f'<div class="card" style="border-left-color: {t.color};">{t.task_date} {t.title}</div>' for t in tasks])
-    return render_template_string(BASE_HTML, content=f'<h2>タスク登録</h2><form method="POST">日付:<input type="date" name="date" required>タイトル:<input type="text" name="title" required>色:{get_color_ui_html("#3182ce", "cp", "cb")}<button type="submit" class="main-btn">保存</button></form><hr>{t_html}')
+    t_html = "".join([f'<div class="card" style="border-left-color: {t.color};"><b>{t.task_date}</b> {t.title} <a href="/tasks/delete/{t.id}" style="float:right; color:#999;">削除</a></div>' for t in tasks])
+    color_ui = get_color_ui_html("#3182ce", "cp", "cb")
+    return render_template_string(BASE_HTML, content=f'<h2>タスク追加</h2><form method="POST">日付:<input type="date" name="date" required>タイトル:<input type="text" name="title" required>通知(日前):<input type="number" name="notify" value="1">表示色:{color_ui}<button type="submit" class="main-btn">保存</button></form><hr>{t_html}')
 
 @app.route('/habits', methods=['GET', 'POST'])
 @login_required
@@ -180,8 +247,24 @@ def manage_habits():
         new_h = Habit(user_id=current_user.id, day_of_week=request.form.get('dow'), title=request.form.get('title'), color=request.form.get('color'))
         db.session.add(new_h); db.session.commit(); return redirect(url_for('manage_habits'))
     habits = Habit.query.filter_by(user_id=current_user.id).all()
-    h_html = "".join([f'<div class="card" style="border-left-color: {h.color};">{h.title} ({h.day_of_week})</div>' for h in habits])
-    return render_template_string(BASE_HTML, content=f'<h2>習慣登録</h2><form method="POST">曜日:<select name="dow"><option>月曜日</option><option>火曜日</option><option>水曜日</option><option>木曜日</option><option>金曜日</option><option>土曜日</option><option>日曜日</option></select>タイトル:<input type="text" name="title" required>色:{get_color_ui_html("#38a169", "hcp", "hcb")}<button type="submit" class="main-btn">保存</button></form><hr>{h_html}')
+    h_html = "".join([f'<div class="card" style="border-left-color: {h.color};"><b>{h.title}</b> ({h.day_of_week}) <span class="streak-badge">🔥 {h.streak_count}日継続</span><a href="/habits/delete/{h.id}" style="float:right; color:#999;">削除</a></div>' for h in habits])
+    color_ui = get_color_ui_html("#38a169", "hcp", "hcb")
+    return render_template_string(BASE_HTML, content=f'<h2>習慣管理</h2><form method="POST">曜日:<select name="dow"><option>月曜日</option><option>火曜日</option><option>水曜日</option><option>木曜日</option><option>金曜日</option><option>土曜日</option><option>日曜日</option></select>タイトル:<input type="text" name="title" required>表示色:{color_ui}<button type="submit" class="main-btn">保存</button></form><hr>{h_html}')
+
+@app.route('/habits/achieve/<int:id>')
+@login_required
+def achieve_habit(id):
+    h = db.session.get(Habit, id)
+    if h and h.last_achieved_date != date.today():
+        h.streak_count += 1; h.last_achieved_date = date.today(); db.session.commit()
+    return redirect(url_for('index') if request.args.get('from') == 'home' else url_for('manage_habits'))
+
+@app.route('/tasks/complete/<int:id>')
+@login_required
+def complete_task(id):
+    t = db.session.get(Task, id)
+    if t: t.is_completed = not t.is_completed; db.session.commit()
+    return redirect(url_for('index'))
 
 @app.route('/colors/favorite', methods=['POST'])
 @login_required
@@ -191,6 +274,24 @@ def add_favorite_color():
         new_fav = FavoriteColor(user_id=current_user.id, hex_code=hex_code)
         db.session.add(new_fav); db.session.commit()
     return jsonify({'success': True})
+
+@app.route('/colors/favorite/delete/<int:id>', methods=['POST'])
+@login_required
+def delete_favorite_color(id):
+    fav = db.session.get(FavoriteColor, id)
+    if fav and fav.user_id == current_user.id:
+        db.session.delete(fav); db.session.commit()
+    return jsonify({'success': True})
+
+@app.route('/tasks/delete/<int:id>')
+@login_required
+def delete_task(id):
+    t = db.session.get(Task, id); db.session.delete(t); db.session.commit(); return redirect(url_for('manage_tasks'))
+
+@app.route('/habits/delete/<int:id>')
+@login_required
+def delete_habit(id):
+    h = db.session.get(Habit, id); db.session.delete(h); db.session.commit(); return redirect(url_for('manage_habits'))
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
@@ -213,8 +314,7 @@ def logout(): logout_user(); return redirect(url_for('login'))
 
 @app.route('/init-db')
 def init_db():
-    db.create_all()
-    return "完了"
+    db.create_all(); return "データベース初期化完了"
 
 if __name__ == '__main__':
     app.run()
