@@ -9,17 +9,27 @@ import json
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-123')
 
-# --- 修正ポイント：環境変数からURLを取得するように変更 ---
-# Renderの設定(DATABASE_URL)があればそれを使い、なければローカル(localhost)を使います
-database_url = os.environ.get('DATABASE_URL', "postgresql://guest:password@localhost:5432/my-db")
-app.config['SQLALCHEMY_DATABASE_URI'] = database_url
+# --- データベース設定 ---
+# Renderの環境変数 DATABASE_URL を取得
+database_url = os.environ.get('DATABASE_URL')
+
+# RenderのURLが「postgres://」で始まっている場合、「postgresql://」に自動変換する（エラー回避）
+if database_url and database_url.startswith("postgres://"):
+    database_url = database_url.replace("postgres://", "postgresql://", 1)
+
+# URLがない場合はローカル環境とみなす
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url or "postgresql://guest:password@localhost:5432/my-db"
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
 
-# --- 修正ポイント：本番環境でもテーブルが自動作成されるようにここに配置 ---
+# --- 重要：起動時にテーブルを強制作成する ---
 with app.app_context():
-    db.create_all()
+    try:
+        db.create_all()
+        print("Database tables created successfully!")
+    except Exception as e:
+        print(f"Database creation error: {e}")
 
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -86,17 +96,14 @@ BASE_HTML = """
         button.main-btn { background: #333; color: white; padding: 10px; border: none; border-radius: 5px; cursor: pointer; width: 100%; font-size: 1rem; }
         form label { font-weight: bold; display: block; margin-top: 10px; }
         form input, form select, form textarea { width: 100%; padding: 10px; margin: 5px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }
-        
         .color-selector-wrapper { position: relative; width: 100%; margin-top: 5px; height: 40px; }
         .real-picker { position: absolute; opacity: 0; width: 100%; height: 100%; cursor: pointer; z-index: 2; }
         .visual-bar { width: 100%; height: 100%; border-radius: 8px; border: 2px solid rgba(0,0,0,0.05); transition: transform 0.1s; }
-        
         .fav-palette { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
         .color-dot { width: 30px; height: 30px; border-radius: 50%; cursor: pointer; border: 2px solid #fff; box-shadow: 0 0 3px rgba(0,0,0,0.2); transition: transform 0.2s; }
         .color-dot:hover { transform: scale(1.1); }
         .add-fav-btn { font-size: 0.8rem; cursor: pointer; color: #666; background: #eee; border: none; padding: 5px 10px; border-radius: 4px; margin-top: 5px; }
         .streak-badge { font-size: 0.8rem; background: #fffaf0; color: #dd6b20; border: 1px solid #fbd38d; padding: 2px 8px; border-radius: 12px; font-weight: bold; margin-left: 8px; }
-        
         #calendar { margin-bottom: 30px; }
     </style>
 </head>
@@ -119,7 +126,10 @@ BASE_HTML = """
 
 # --- 色管理用UIコンポーネント ---
 def get_color_ui_html(current_color, picker_id, bar_id):
-    favs = FavoriteColor.query.filter_by(user_id=current_user.id).all()
+    try:
+        favs = FavoriteColor.query.filter_by(user_id=current_user.id).all()
+    except:
+        favs = []
     fav_dots = "".join([f'''
         <div class="color-dot" 
              style="background: {f.hex_code};" 
@@ -334,4 +344,4 @@ def login():
 def logout(): logout_user(); return redirect(url_for('login'))
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run()
