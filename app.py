@@ -85,6 +85,9 @@ BASE_HTML = """
         button.main-btn { background: #333; color: white; padding: 10px; border: none; border-radius: 5px; cursor: pointer; width: 100%; font-size: 1rem; }
         .delete-btn { color: #ff9999; font-size: 0.8rem; text-decoration: underline; cursor: pointer; background: none; border: none; margin-left: 15px; }
         .streak-badge { font-size: 0.8rem; background: #fffaf0; color: #dd6b20; border: 1px solid #fbd38d; padding: 2px 8px; border-radius: 12px; font-weight: bold; margin-left: 8px; }
+        .color-dot { width: 30px; height: 30px; border-radius: 50%; display: inline-block; margin-right: 8px; cursor: pointer; border: 2px solid #fff; box-shadow: 0 0 3px rgba(0,0,0,0.2); }
+        .fav-palette { margin: 10px 0; display: flex; flex-wrap: wrap; gap: 5px; }
+        .color-note { font-size: 0.75rem; color: #888; margin-bottom: 5px; }
     </style>
 </head>
 <body>
@@ -112,19 +115,20 @@ BASE_HTML = """
 
 def get_color_ui_html(current_color, picker_id, bar_id):
     favs = FavoriteColor.query.filter_by(user_id=current_user.id).all()
-    fav_dots = "".join([f'<div class="color-dot" style="width:25px;height:25px;border-radius:50%;display:inline-block;margin-right:5px;cursor:pointer;background:{f.hex_code};" onclick="applyFav(\'{f.hex_code}\', \'{picker_id}\', \'{bar_id}\')" oncontextmenu="deleteFav(event, \'{f.id}\')"></div>' for f in favs])
+    fav_dots = "".join([f'<div class="color-dot" style="background:{f.hex_code};" onclick="applyFav(\'{f.hex_code}\', \'{picker_id}\', \'{bar_id}\')" oncontextmenu="deleteFav(event, \'{f.id}\')" title="右クリックで削除"></div>' for f in favs])
     return f"""
     <div style="margin:10px 0;">
-        <input type="color" id="{picker_id}" name="color" value="{current_color}" style="width:100%;height:40px;cursor:pointer;">
-        <div id="{bar_id}" style="height:10px;background:{current_color};margin-top:2px;border-radius:5px;"></div>
-        <div style="margin-top:10px;">{fav_dots}</div>
-        <button type="button" onclick="saveFav('{picker_id}')" style="font-size:0.7rem;margin-top:5px;">この色を保存</button>
+        <input type="color" id="{picker_id}" name="color" value="{current_color}" style="width:100%; height:45px; cursor:pointer; border:1px solid #ddd; border-radius:5px;">
+        <div id="{bar_id}" style="height:8px; background:{current_color}; margin-top:2px; border-radius:4px;"></div>
+        <div class="fav-palette">{fav_dots}</div>
+        <div class="color-note">※ 色を右クリックで削除</div>
+        <button type="button" onclick="saveFav('{picker_id}')" style="background:#eee; border:1px solid #ccc; padding:5px 10px; border-radius:4px; cursor:pointer; font-size:0.8rem;">今の色をお気に入り登録</button>
     </div>
     <script>
         document.getElementById('{picker_id}').oninput = function() {{ document.getElementById('{bar_id}').style.background = this.value; }};
         function applyFav(hex, pId, bId) {{ document.getElementById(pId).value = hex; document.getElementById(bId).style.background = hex; }}
         function saveFav(pId) {{ fetch('/colors/favorite', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({{ hex: document.getElementById(pId).value }}) }}).then(() => location.reload()); }}
-        function deleteFav(e, id) {{ e.preventDefault(); if(confirm('消去？')) fetch('/colors/favorite/delete/'+id, {{method:'POST'}}).then(()=>location.reload()); }}
+        function deleteFav(e, id) {{ e.preventDefault(); if(confirm('この色を削除しますか？')) fetch('/colors/favorite/delete/'+id, {{method:'POST'}}).then(()=>location.reload()); return false; }}
     </script>
     """
 
@@ -169,19 +173,16 @@ def index():
 def get_events():
     events = []
     today = date.today()
-    # カレンダーが表示しようとしている期間を取得
     start_str = request.args.get('start', '').split('T')[0]
     end_str = request.args.get('end', '').split('T')[0]
     start_dt = datetime.strptime(start_str, '%Y-%m-%d').date() if start_str else today - timedelta(days=35)
     end_dt = datetime.strptime(end_str, '%Y-%m-%d').date() if end_str else today + timedelta(days=35)
 
-    # タスク
     tasks = Task.query.filter_by(user_id=current_user.id).all()
     for t in tasks:
         if start_dt <= t.task_date <= end_dt:
             events.append({'title': f"{'✅' if t.is_completed else '📌'} {t.title}", 'start': t.task_date.isoformat(), 'color': t.color if not t.is_completed else '#ccc', 'extendedProps': {'type':'タスク', 'db_id':t.id}})
     
-    # 習慣（カレンダーの表示期間に合わせて動的に生成）
     habits = Habit.query.filter_by(user_id=current_user.id).all()
     curr = start_dt
     while curr <= end_dt:
