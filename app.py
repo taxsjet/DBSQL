@@ -58,15 +58,7 @@ class FavoriteColor(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'))
     hex_code = db.Column(db.String(10), nullable=False)
 
-# --- 🚀 重要：強制的にテーブルを作るための秘密のページ ---
-@app.route('/init-db')
-def init_db():
-    try:
-        db.create_all()
-        return "データベースの初期化（テーブル作成）に成功しました！戻って新規登録してください。"
-    except Exception as e:
-        return f"エラーが発生しました: {e}"
-
+# --- ログイン管理 ---
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
@@ -93,6 +85,14 @@ BASE_HTML = """
         button.main-btn { background: #333; color: white; padding: 10px; border: none; border-radius: 5px; cursor: pointer; width: 100%; font-size: 1rem; }
         form label { font-weight: bold; display: block; margin-top: 10px; }
         form input, form select, form textarea { width: 100%; padding: 10px; margin: 5px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }
+        .color-selector-wrapper { position: relative; width: 100%; margin-top: 5px; height: 40px; }
+        .real-picker { position: absolute; opacity: 0; width: 100%; height: 100%; cursor: pointer; z-index: 2; }
+        .visual-bar { width: 100%; height: 100%; border-radius: 8px; border: 2px solid rgba(0,0,0,0.05); transition: transform 0.1s; }
+        .fav-palette { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+        .color-dot { width: 30px; height: 30px; border-radius: 50%; cursor: pointer; border: 2px solid #fff; box-shadow: 0 0 3px rgba(0,0,0,0.2); transition: transform 0.2s; }
+        .add-fav-btn { font-size: 0.8rem; cursor: pointer; color: #666; background: #eee; border: none; padding: 5px 10px; border-radius: 4px; margin-top: 5px; }
+        .streak-badge { font-size: 0.8rem; background: #fffaf0; color: #dd6b20; border: 1px solid #fbd38d; padding: 2px 8px; border-radius: 12px; font-weight: bold; margin-left: 8px; }
+        #calendar { margin-bottom: 30px; }
     </style>
 </head>
 <body>
@@ -112,53 +112,92 @@ BASE_HTML = """
 </html>
 """
 
-# --- 各ルート設定 ---
+# --- 色管理用UI ---
+def get_color_ui_html(current_color, picker_id, bar_id):
+    favs = FavoriteColor.query.filter_by(user_id=current_user.id).all()
+    fav_dots = "".join([f'<div class="color-dot" style="background: {f.hex_code};" onclick="applyFav(\'{f.hex_code}\', \'{picker_id}\', \'{bar_id}\')"></div>' for f in favs])
+    return f"""
+    <div class="color-selector-wrapper">
+        <input type="color" name="color" class="real-picker" id="{picker_id}" value="{current_color}">
+        <div id="{bar_id}" class="visual-bar" style="background: {current_color};"></div>
+    </div>
+    <div class="fav-palette">{fav_dots}</div>
+    <button type="button" class="add-fav-btn" onclick="saveFav('{picker_id}')">お気に入り登録</button>
+    <script>
+        document.getElementById('{picker_id}').oninput = function() {{ document.getElementById('{bar_id}').style.background = this.value; }};
+        function applyFav(hex, pId, bId) {{ document.getElementById(pId).value = hex; document.getElementById(bId).style.background = hex; }}
+        function saveFav(pId) {{
+            const hex = document.getElementById(pId).value;
+            fetch('/colors/favorite', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({{ hex: hex }}) }})
+            .then(res => res.json()).then(data => {{ if(data.success) location.reload(); }});
+        }}
+    </script>
+    """
+
+# --- ルート設定 ---
 
 @app.route('/')
 def index():
     if not current_user.is_authenticated: return redirect(url_for('login'))
     today = date.today()
-    try:
-        tasks = Task.query.filter_by(user_id=current_user.id).all()
-    except:
-        return redirect(url_for('init_db')) # エラーが出たら初期化ページへ飛ばす
-    
-    urgent_tasks_html = ""
-    for t in tasks:
-        if not t.is_completed and t.is_notify:
-            notice_start = t.task_date - timedelta(days=t.notify_days_before)
-            if notice_start <= today <= t.task_date:
-                diff = (t.task_date - today).days
-                urgent_tasks_html += f'<div class="card alert-card"><b>【{"今日まで" if diff==0 else "あと"+str(diff)+"日"}】</b> {t.title}</div>'
-
-    content = f"<h2>こんにちは、{current_user.username} さん</h2>{f'<div><h3>🔥 緊急タスク</h3>{urgent_tasks_html}</div><hr>' if urgent_tasks_html else ''}<div id='calendar'></div>"
+    tasks = Task.query.filter_by(user_id=current_user.id).all()
+    urgent_html = "".join([f'<div class="card alert-card"><b>🔥 あと{(t.task_date - today).days}日:</b> {t.title}</div>' for t in tasks if not t.is_completed and (t.task_date - today).days <= t.notify_days_before])
+    content = f"<h2>こんにちは、{current_user.username}さん</h2>{urgent_html}<div id='calendar'></div><script>document.addEventListener('DOMContentLoaded', function() {{ var cal = new FullCalendar.Calendar(document.getElementById('calendar'), {{ initialView: 'dayGridMonth', locale: 'ja', events: '/api/events' }}); cal.render(); }});</script>"
     return render_template_string(BASE_HTML, content=content)
 
 @app.route('/api/events')
 @login_required
 def get_events():
-    start_str = request.args.get('start', '').split('T')[0]
-    end_str = request.args.get('end', '').split('T')[0]
-    start_dt = datetime.strptime(start_str, '%Y-%m-%d').date() if start_str else date.today() - timedelta(days=30)
-    end_dt = datetime.strptime(end_str, '%Y-%m-%d').date() if end_str else date.today() + timedelta(days=30)
     events = []
-    today = date.today()
     tasks = Task.query.filter_by(user_id=current_user.id).all()
     for t in tasks:
-        if start_dt <= t.task_date <= end_dt:
-            events.append({'title': f"📌 {t.title}", 'start': t.task_date.isoformat(), 'color': t.color if not t.is_completed else '#ccc'})
+        events.append({'title': f"📌 {t.title}", 'start': t.task_date.isoformat(), 'color': t.color if not t.is_completed else '#ccc'})
+    
+    habits = Habit.query.filter_by(user_id=current_user.id).all()
+    today = date.today()
+    for i in range(-30, 31):
+        curr = today + timedelta(days=i)
+        dow = ['月曜日','火曜日','水曜日','木曜日','金曜日','土曜日','日曜日'][curr.weekday()]
+        for h in habits:
+            if h.day_of_week == dow:
+                events.append({'title': f"🔄 {h.title}", 'start': curr.isoformat(), 'color': h.color})
     return jsonify(events)
+
+@app.route('/tasks', methods=['GET', 'POST'])
+@login_required
+def manage_tasks():
+    if request.method == 'POST':
+        new_t = Task(user_id=current_user.id, task_date=datetime.strptime(request.form.get('date'), '%Y-%m-%d').date(), title=request.form.get('title'), color=request.form.get('color'))
+        db.session.add(new_t); db.session.commit(); return redirect(url_for('manage_tasks'))
+    tasks = Task.query.filter_by(user_id=current_user.id).order_by(Task.task_date).all()
+    t_html = "".join([f'<div class="card" style="border-left-color: {t.color};">{t.task_date} {t.title}</div>' for t in tasks])
+    return render_template_string(BASE_HTML, content=f'<h2>タスク登録</h2><form method="POST">日付:<input type="date" name="date" required>タイトル:<input type="text" name="title" required>色:{get_color_ui_html("#3182ce", "cp", "cb")}<button type="submit" class="main-btn">保存</button></form><hr>{t_html}')
+
+@app.route('/habits', methods=['GET', 'POST'])
+@login_required
+def manage_habits():
+    if request.method == 'POST':
+        new_h = Habit(user_id=current_user.id, day_of_week=request.form.get('dow'), title=request.form.get('title'), color=request.form.get('color'))
+        db.session.add(new_h); db.session.commit(); return redirect(url_for('manage_habits'))
+    habits = Habit.query.filter_by(user_id=current_user.id).all()
+    h_html = "".join([f'<div class="card" style="border-left-color: {h.color};">{h.title} ({h.day_of_week})</div>' for h in habits])
+    return render_template_string(BASE_HTML, content=f'<h2>習慣登録</h2><form method="POST">曜日:<select name="dow"><option>月曜日</option><option>火曜日</option><option>水曜日</option><option>木曜日</option><option>金曜日</option><option>土曜日</option><option>日曜日</option></select>タイトル:<input type="text" name="title" required>色:{get_color_ui_html("#38a169", "hcp", "hcb")}<button type="submit" class="main-btn">保存</button></form><hr>{h_html}')
+
+@app.route('/colors/favorite', methods=['POST'])
+@login_required
+def add_favorite_color():
+    hex_code = request.json.get('hex')
+    if hex_code:
+        new_fav = FavoriteColor(user_id=current_user.id, hex_code=hex_code)
+        db.session.add(new_fav); db.session.commit()
+    return jsonify({'success': True})
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
-        try:
-            user = User(username=request.form.get('username'), email=request.form.get('email'))
-            user.set_password(request.form.get('password'))
-            db.session.add(user); db.session.commit()
-            return redirect(url_for('login'))
-        except:
-            return redirect(url_for('init_db')) # テーブルがないなら初期化ページへ
+        user = User(username=request.form.get('username'), email=request.form.get('email'))
+        user.set_password(request.form.get('password'))
+        db.session.add(user); db.session.commit(); return redirect(url_for('login'))
     return render_template_string(BASE_HTML, content='<h2>新規登録</h2><form method="POST">名前:<input type="text" name="username">メール:<input type="email" name="email">パスワード:<input type="password" name="password"><button type="submit" class="main-btn">登録</button></form>')
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -171,6 +210,11 @@ def login():
 
 @app.route('/logout')
 def logout(): logout_user(); return redirect(url_for('login'))
+
+@app.route('/init-db')
+def init_db():
+    db.create_all()
+    return "完了"
 
 if __name__ == '__main__':
     app.run()
