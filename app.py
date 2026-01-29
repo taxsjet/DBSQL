@@ -7,11 +7,20 @@ from datetime import datetime, date, timedelta
 import json
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-123'
-app.config['SQLALCHEMY_DATABASE_URI'] = "postgresql://guest:password@localhost:5432/my-db"
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-123')
+
+# --- 修正ポイント：環境変数からURLを取得するように変更 ---
+# Renderの設定(DATABASE_URL)があればそれを使い、なければローカル(localhost)を使います
+database_url = os.environ.get('DATABASE_URL', "postgresql://guest:password@localhost:5432/my-db")
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
+
+# --- 修正ポイント：本番環境でもテーブルが自動作成されるようにここに配置 ---
+with app.app_context():
+    db.create_all()
+
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
@@ -325,5 +334,4 @@ def login():
 def logout(): logout_user(); return redirect(url_for('login'))
 
 if __name__ == '__main__':
-    with app.app_context(): db.create_all()
     app.run(debug=True, port=5000)
